@@ -1,0 +1,28 @@
+{
+  "productName": "Sofle Overlay",
+  "version": "0.1.0",
+  "identifier": "com.sofle-overlay.app",
+  "build": {
+    "frontendDist": "../src",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Sofle Overlay",
+        "width": 972,
+        "height": 428,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {}
+}

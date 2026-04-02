@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sofle Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: transparent; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; user-select: none; }
+    body { padding: 6px; }
+    #container {
+      background: rgba(18,18,24,0.93);
+      border-radius: 12px;
+      padding: 10px 14px 8px;
+      border: 1px solid rgba(255,255,255,0.08);
+      height: calc(100vh - 12px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #header {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 6px; cursor: grab;
+    }
+    #layer-name { font-size: 16px; font-weight: 700; color: var(--accent); }
+    .tab {
+      display: inline-block; padding: 2px 12px; border-radius: 5px;
+      font-size: 11px; cursor: pointer; color: rgba(255,255,255,0.3); transition: all 0.15s;
+    }
+    .tab.active { background: var(--accent); color: #121218; font-weight: 700; }
+    .tab:hover:not(.active) { color: rgba(255,255,255,0.5); }
+    #lang-badge { font-size: 14px; font-weight: 800; padding: 2px 10px; border-radius: 5px; letter-spacing: 1px; }
+    #lang-badge.us { background: rgba(70,140,220,0.3); color: #5a9fe6; }
+    #lang-badge.ru { background: rgba(220,60,60,0.3); color: #e65a5a; }
+    #mode-badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+    #mode-badge.auto { background: rgba(80,200,120,0.2); color: #50c878; }
+    #mode-badge.manual { background: rgba(200,160,80,0.2); color: #c8a050; }
+    #hint { margin-left: auto; font-size: 9px; color: rgba(255,255,255,0.18); }
+    #winsize { position: fixed; top: 6px; right: 12px; font-size: 9px; color: rgba(255,255,255,0.12); pointer-events: none; }
+    #status { text-align: center; color: rgba(255,255,255,0.4); font-size: 11px; padding: 30px; }
+    canvas { display: block; margin: 0 auto; flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="header" data-tauri-drag-region>
+      <span id="layer-name">Layer 0</span>
+      <div id="tabs"></div>
+      <span id="lang-badge" class="us">EN</span>
+      <span id="mode-badge" class="auto">AUTO</span>
+      <span id="hint">A: auto | arrows: layer | Esc: close</span>
+    </div>
+    <canvas id="kbd" style="display:none"></canvas>
+    <div id="status">Connecting to Sofle...</div>
+    <div id="winsize"></div>
+  </div>
+
+<script>
+function invoke(cmd, args) {
+  const ipc = window.__TAURI_INTERNALS__;
+  if (ipc && ipc.invoke) return ipc.invoke(cmd, args);
+  return Promise.reject('Tauri IPC not available');
+}
+
+// ── Layout constants ────────────────────────────────────────────
+const U = 52;        // key size px
+const GAP = 6;       // gap between keys px
+const S = U + GAP;   // step
+const HALF_GAP = 4 * S; // 4 columns gap between halves
+const PAD = 8;       // canvas padding
+
+// ── Key definitions ─────────────────────────────────────────────
+// Each key: { mr, mc, col, row } — position in grid units
+// Left main grid: 6 cols × 4 rows, matrix rows 0-3, cols 0-5
+// Right main grid: 6 cols × 4 rows, matrix rows 5-8, cols reversed (5-vc)
+// Left thumb: 5 keys, matrix row 4, cols 0-4 — centered under cols 1-5
+// Right thumb: 5 keys, matrix row 9, cols 0-4 (reversed) — centered under cols 0-4
+// Encoders: row 4 col 5 (left), row 9 col 5 (right)
+
+function buildKeys() {
+  const left = { grid: [], thumb: [], enc: null };
+  const right = { grid: [], thumb: [], enc: null };
+
+  // Column stagger (in u, negative = higher)
+  // Col 0,1: baseline; Col 2: -0.25; Col 3: -0.5; Col 4: -0.25; Col 5: 0
+  const LSTAG = [0, 0, -0.15, -0.30, -0.15, 0];
+  const RSTAG = [0, -0.15, -0.30, -0.15, 0, 0];
+
+  // Left grid: 6×4 with stagger
+  for (let r = 0; r < 4; r++)
+    for (let c = 0; c < 6; c++)
+      left.grid.push({ mr: r, mc: c, col: c, row: r + LSTAG[c] });
+
+  // Right grid: 6×4 with stagger, matrix cols reversed
+  for (let r = 0; r < 4; r++)
+    for (let vc = 0; vc < 6; vc++)
+      right.grid.push({ mr: r + 5, mc: 5 - vc, col: vc, row: r + RSTAG[vc] });
+
+  // Left thumb: Super(mc0) under X(col1), Alt(mc1) under C(col2), Ctrl(mc2) under V(col3)
+  // MO(2)(mc3) rotated, Enter(mc4) rotated more
+  const tRowL = 4.3;
+  left.thumb.push({ mr:4, mc:0, col:1, row:tRowL + LSTAG[1] });       // Super under X
+  left.thumb.push({ mr:4, mc:1, col:2, row:tRowL + LSTAG[2] });       // Alt under C
+  left.thumb.push({ mr:4, mc:2, col:3, row:tRowL + LSTAG[3] });       // Ctrl under V
+  left.thumb.push({ mr:4, mc:3, col:4.2, row:tRowL - 0.15, r:10 });   // MO(2) higher, rotated
+  left.thumb.push({ mr:4, mc:4, col:5.4, row:tRowL - 0.1, r:20, w:0.85, h:1.2 }); // Enter rotated
+
+  // Right thumb: mirrored — RSuper under ., RAlt under ,, RCtrl under M
+  // MO(3) rotated, Space rotated
+  const tRowR = 4.3;
+  right.thumb.push({ mr:9, mc:0, col:4, row:tRowR + RSTAG[4] });      // RSuper under .
+  right.thumb.push({ mr:9, mc:1, col:3, row:tRowR + RSTAG[3] });      // RAlt under ,
+  right.thumb.push({ mr:9, mc:2, col:2, row:tRowR + RSTAG[2] });      // RCtrl under M
+  right.thumb.push({ mr:9, mc:3, col:0.8, row:tRowR - 0.15, r:-10 }); // MO(3) higher, rotated
+  right.thumb.push({ mr:9, mc:4, col:-0.4, row:tRowR - 0.1, r:-20, w:0.85, h:1.2 }); // Space rotated
+
+  // Encoders — in the gap, 1 col outside the grid
+  left.enc = { mr: 4, mc: 5, col: 6.3, row: 3.0 };
+  right.enc = { mr: 9, mc: 5, col: -1.3, row: 3.0 };
+
+  return { left, right };
+}
+
+const KEYS = buildKeys();
+
+// ── Colors ──────────────────────────────────────────────────────
+const COLORS = [
+  { rgb: [70,140,220], hex: '#468CDC' },
+  { rgb: [80,190,115], hex: '#50BE73' },
+  { rgb: [230,150,50], hex: '#E69632' },
+  { rgb: [200,80,130], hex: '#C85082' },
+  { rgb: [150,100,200], hex: '#9664C8' },
+  { rgb: [130,180,180], hex: '#82B4B4' },
+];
+
+// ── State ───────────────────────────────────────────────────────
+let keymap = null, currentLayer = 0, autoMode = true;
+let pressedSet = new Set();
+const kid = (r, c) => `${r}-${c}`;
+
+// ── Canvas ──────────────────────────────────────────────────────
+const canvas = document.getElementById('kbd');
+const ctx = canvas.getContext('2d');
+let CW, CH;
+
+const TOP_PAD = S; // one row padding above keys
+
+function setupCanvas() {
+  const halfW = 6 * S;
+  CW = halfW * 2 + HALF_GAP + PAD * 2;
+  CH = TOP_PAD + 6.0 * S + PAD * 2;
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = CW * dpr;
+  canvas.height = CH * dpr;
+  canvas.style.width = CW + 'px';
+  canvas.style.height = CH + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function render() {
+  if (!keymap) return;
+  const c = COLORS[currentLayer % COLORS.length];
+  const [ar, ag, ab] = c.rgb;
+  const ld = keymap.layers[currentLayer];
+
+  ctx.clearRect(0, 0, CW, CH);
+
+  const halfW = 6 * S;
+  const leftOX = PAD;
+  const rightOX = PAD + halfW + HALF_GAP;
+  const topY = PAD + TOP_PAD;
+
+  // Left half
+  drawHalf(leftOX, topY, KEYS.left, ld, ar, ag, ab);
+
+  // Right half
+  drawHalf(rightOX, topY, KEYS.right, ld, ar, ag, ab);
+}
+
+function drawHalf(ox, oy, half, ld, ar, ag, ab) {
+  // Grid keys
+  for (const k of half.grid) {
+    const x = ox + k.col * S;
+    const y = oy + k.row * S;
+    drawKey(x, y, U, U, ld[k.mr][k.mc], k.mr, k.mc, ar, ag, ab);
+  }
+
+  // Thumb keys (may have rotation, custom size)
+  for (const k of half.thumb) {
+    const x = ox + k.col * S;
+    const y = oy + k.row * S;
+    const w = (k.w || 1) * U;
+    const h = (k.h || 1) * U;
+    const rot = k.r || 0;
+    drawKeyRot(x, y, w, h, rot, ld[k.mr][k.mc], k.mr, k.mc, ar, ag, ab);
+  }
+
+  // Encoder
+  if (half.enc) {
+    const e = half.enc;
+    const cx = ox + e.col * S + U / 2;
+    const cy = oy + e.row * S + U / 2;
+    const r = U * 0.4;
+    const info = ld[e.mr][e.mc];
+    const pressed = pressedSet.has(kid(e.mr, e.mc));
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = pressed ? `rgba(${ar},${ag},${ab},0.5)` : 'rgba(40,40,50,0.55)';
+    ctx.fill();
+    ctx.strokeStyle = pressed ? `rgb(${ar},${ag},${ab})` : `rgba(${ar},${ag},${ab},0.3)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (info.label) {
+      ctx.fillStyle = pressed ? '#fff' : 'rgba(255,255,255,0.55)';
+      ctx.font = '8px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(info.label, cx, cy);
+    }
+  }
+}
+
+function drawKey(x, y, w, h, info, mr, mc, ar, ag, ab) {
+  const code = info.code;
+  const label = info.label;
+  const pressed = pressedSet.has(kid(mr, mc));
+  const isThumb = (mr === 4 || mr === 9);
+  const rad = 5;
+
+  // Background
+  let bg;
+  if (pressed) bg = `rgba(${ar},${ag},${ab},0.6)`;
+  else if (code === 0) bg = 'rgba(28,28,36,0.2)';
+  else if (code === 1) bg = 'rgba(35,35,42,0.3)';
+  else if (isLayerKey(code)) bg = `rgba(${ar},${ag},${ab},0.28)`;
+  else if (code <= 0xFF && code >= 0xE0) bg = 'rgba(100,90,130,0.4)';
+  else if (isThumb) bg = 'rgba(50,55,75,0.9)';
+  else bg = 'rgba(38,38,48,0.85)';
+
+  ctx.fillStyle = bg;
+  roundRect(x, y, w, h, rad);
+  ctx.fill();
+
+  // Border
+  ctx.strokeStyle = pressed ? `rgb(${ar},${ag},${ab})` :
+    isThumb ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = pressed ? 1.5 : 1;
+  roundRect(x, y, w, h, rad);
+  ctx.stroke();
+
+  // Label
+  if (label && code !== 0) {
+    const fs = label.length > 6 ? 7 : label.length > 4 ? 9 : label.length > 2 ? 10 : 12;
+    ctx.font = `${pressed ? 'bold ' : ''}${fs}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = pressed ? '#fff' :
+      code === 1 ? 'rgba(255,255,255,0.15)' :
+      isLayerKey(code) ? `rgb(${ar},${ag},${ab})` : 'rgba(255,255,255,0.85)';
+    ctx.fillText(label, x + w / 2, y + h / 2);
+  }
+}
+
+function drawKeyRot(x, y, w, h, rot, info, mr, mc, ar, ag, ab) {
+  if (!rot) { drawKey(x, y, w, h, info, mr, mc, ar, ag, ab); return; }
+  ctx.save();
+  ctx.translate(x + w/2, y + h/2);
+  ctx.rotate(rot * Math.PI / 180);
+  drawKey(-w/2, -h/2, w, h, info, mr, mc, ar, ag, ab);
+  ctx.restore();
+}
+
+function isLayerKey(code) {
+  return [0x5100, 0x5300, 0x5400, 0x5800].includes(code & 0xFF00) || (code & 0xF000) === 0x4000;
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// ── UI ──────────────────────────────────────────────────────────
+function setLayer(n) {
+  if (!keymap) return;
+  currentLayer = n;
+  const c = COLORS[n % COLORS.length];
+  document.documentElement.style.setProperty('--accent', c.hex);
+  document.getElementById('layer-name').textContent = `Layer ${n}`;
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === n));
+  render();
+}
+
+function renderTabs() {
+  const box = document.getElementById('tabs');
+  box.innerHTML = '';
+  for (let i = 0; i < keymap.num_layers; i++) {
+    const t = document.createElement('span');
+    t.className = 'tab' + (i === currentLayer ? ' active' : '');
+    t.textContent = i;
+    t.onclick = () => { autoMode = false; updMode(); setLayer(i); };
+    box.appendChild(t);
+  }
+}
+
+function updMode() {
+  const b = document.getElementById('mode-badge');
+  b.className = autoMode ? 'auto' : 'manual';
+  b.textContent = autoMode ? 'AUTO' : 'MANUAL';
+}
+
+async function poll() {
+  if (!keymap) return;
+  try {
+    const st = await invoke('poll_layer');
+    const np = new Set(st.pressed.map(([r, c]) => kid(r, c)));
+    const changed = np.size !== pressedSet.size || [...np].some(k => !pressedSet.has(k));
+    if (changed) { pressedSet = np; render(); }
+    if (autoMode && st.active_layer !== currentLayer) setLayer(st.active_layer);
+  } catch (e) {}
+}
+
+async function pollLang() {
+  try {
+    const l = await invoke('get_input_lang');
+    const b = document.getElementById('lang-badge');
+    b.textContent = l.label;
+    b.className = l.id;
+  } catch (e) {}
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' || e.key === 'q') { try { invoke('plugin:process|exit', { exitCode: 0 }); } catch (_) {} }
+  if (e.key === 'a') { autoMode = !autoMode; updMode(); }
+  if (e.key === 'ArrowRight') { autoMode = false; updMode(); setLayer((currentLayer + 1) % keymap.num_layers); }
+  if (e.key === 'ArrowLeft') { autoMode = false; updMode(); setLayer((currentLayer - 1 + keymap.num_layers) % keymap.num_layers); }
+  const n = parseInt(e.key);
+  if (!isNaN(n) && n >= 1 && n <= keymap?.num_layers) { autoMode = false; updMode(); setLayer(n - 1); }
+});
+
+async function init() {
+  const st = document.getElementById('status');
+  try {
+    st.textContent = 'Connecting to Sofle...';
+    await invoke('connect_keyboard');
+    st.textContent = 'Reading keymap...';
+    keymap = await invoke('get_keymap');
+    st.style.display = 'none';
+    canvas.style.display = 'block';
+    setupCanvas();
+    renderTabs();
+    setLayer(0);
+    setInterval(poll, 60);
+    setInterval(pollLang, 500);
+    pollLang();
+  } catch (e) { st.textContent = `Error: ${e}`; st.style.color = '#f66'; }
+}
+
+function showSize() {
+  document.getElementById('winsize').textContent = `${window.innerWidth}×${window.innerHeight}`;
+}
+window.addEventListener('resize', showSize);
+showSize();
+
+if (document.readyState === 'complete') init();
+else window.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
