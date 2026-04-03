@@ -132,9 +132,21 @@ const COLORS = [
   { rgb: [130,180,180], hex: '#82B4B4' },
 ];
 
+// ── Language mappings ───────────────────────────────────────────
+const LANG_MAP = {
+  ru: {
+    'Q':'Й','W':'Ц','E':'У','R':'К','T':'Е','Y':'Н','U':'Г','I':'Ш','O':'Щ','P':'З',
+    'A':'Ф','S':'Ы','D':'В','F':'А','G':'П','H':'Р','J':'О','K':'Л','L':'Д',
+    'Z':'Я','X':'Ч','C':'С','V':'М','B':'И','N':'Т','M':'Ь',
+    '[':'Х',']':'Ъ',';':'Ж',"'":'Э',',':'Б','.':'Ю','/':'.','`':'Ё',
+    '{':'Х','}':'Ъ',':':'Ж','"':'Э','<':'Б','>':'Ю','?':',','~':'Ё',
+  }
+};
+
 // ── State ───────────────────────────────────────────────────────
 let keymap = null, currentLayer = 0, autoMode = true;
 let pressedSet = new Set();
+let currentLangId = 'us';
 const kid = (r, c) => `${r}-${c}`;
 
 // ── Canvas ──────────────────────────────────────────────────────
@@ -213,11 +225,12 @@ function drawHalf(ox, oy, half, ld, ar, ag, ab) {
     ctx.stroke();
 
     if (info.label) {
+      const el = translateLabel(info.label);
       ctx.fillStyle = pressed ? '#fff' : 'rgba(255,255,255,0.55)';
       ctx.font = '8px Inter, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(info.label, cx, cy);
+      ctx.fillText(el, cx, cy);
     }
   }
 }
@@ -252,14 +265,15 @@ function drawKey(x, y, w, h, info, mr, mc, ar, ag, ab) {
 
   // Label
   if (label && code !== 0) {
-    const fs = label.length > 6 ? 7 : label.length > 4 ? 9 : label.length > 2 ? 10 : 12;
+    const dl = translateLabel(label);
+    const fs = dl.length > 6 ? 7 : dl.length > 4 ? 9 : dl.length > 2 ? 10 : 12;
     ctx.font = `${pressed ? 'bold ' : ''}${fs}px Inter, system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = pressed ? '#fff' :
       code === 1 ? 'rgba(255,255,255,0.15)' :
       isLayerKey(code) ? `rgb(${ar},${ag},${ab})` : 'rgba(255,255,255,0.85)';
-    ctx.fillText(label, x + w / 2, y + h / 2);
+    ctx.fillText(dl, x + w / 2, y + h / 2);
   }
 }
 
@@ -332,7 +346,17 @@ async function pollLang() {
     const b = document.getElementById('lang-badge');
     b.textContent = l.label;
     b.className = l.id;
+    if (l.id !== currentLangId) {
+      currentLangId = l.id;
+      render();
+    }
   } catch (e) {}
+}
+
+function translateLabel(label) {
+  const map = LANG_MAP[currentLangId];
+  if (!map) return label;
+  return map[label] || label;
 }
 
 document.addEventListener('keydown', e => {
